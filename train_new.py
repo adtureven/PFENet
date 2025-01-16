@@ -134,14 +134,13 @@ def main_worker(gpu, ngpus_per_node, argss):
     active_learning_module = active_learning_module.cuda()
     # 冻结主动学习模块的部分层，假设你只希望训练部分层
     for param in active_learning_module.conv_mid.parameters():
-        param.requires_grad = False
+        param.requires_grad = True
     for param in active_learning_module.conv_prior.parameters():
-        param.requires_grad = False
+        param.requires_grad = True
     for param in active_learning_module.conv_high.parameters():
-        param.requires_grad = False
-    for param in active_learning_module.fc.parameters():
-        param.requires_grad = False
-
+        param.requires_grad = True
+    for param in active_learning_module.final_conv.parameters():
+        param.requires_grad = True
     # 定义优化器
     optimizer_alm = torch.optim.Adam(
         active_learning_module.parameters(),
@@ -166,6 +165,16 @@ def main_worker(gpu, ngpus_per_node, argss):
             logger.info("=> loaded weight '{}'".format(args.weight))
         else:
             logger.info("=> no weight found at '{}'".format(args.weight))
+
+    # 加载 ALM 权重
+    if args.alm_weight:  # 假设你在命令行参数中添加了 --alm_weight
+        if os.path.isfile(args.alm_weight):
+            logger.info("=> loading ALM weight '{}'".format(args.alm_weight))
+            alm_checkpoint = torch.load(args.alm_weight)
+            active_learning_module.load_state_dict(alm_checkpoint['state_dict'])
+            logger.info("=> loaded ALM weight '{}'".format(args.alm_weight))
+        else:
+            logger.info("=> no ALM weight found at '{}'".format(args.alm_weight))
 
     if args.resume:
         if os.path.isfile(args.resume):
@@ -244,7 +253,7 @@ def main_worker(gpu, ngpus_per_node, argss):
             writer.add_scalar('allAcc_train', allAcc_train, epoch_log)     
 
         if args.evaluate and (epoch % 2 == 0 or (args.epochs<=50 and epoch%1==0)):
-            loss_val, mIoU_val, mAcc_val, allAcc_val, class_miou = validate(val_loader, model, criterion)
+            loss_val, mIoU_val, mAcc_val, allAcc_val, class_miou = validate(val_loader, model, active_learning_module, criterion)
             if main_process():
                 writer.add_scalar('loss_val', loss_val, epoch_log)
                 writer.add_scalar('mIoU_val', mIoU_val, epoch_log)
@@ -257,11 +266,33 @@ def main_worker(gpu, ngpus_per_node, argss):
                     os.remove(filename)            
                 filename = args.save_path + '/train_epoch_' + str(epoch) + '_'+str(max_iou)+'.pth'
                 logger.info('Saving checkpoint to: ' + filename)
-                torch.save({'epoch': epoch, 'state_dict': model.state_dict(), 'optimizer': optimizer_pfenet.state_dict()}, filename)
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_pfenet_state_dict': optimizer_pfenet.state_dict(),
+                    'alm_state_dict': active_learning_module.state_dict(),
+                    'optimizer_alm_state_dict': optimizer_alm.state_dict()
+                }, filename)
 
-    filename = args.save_path + '/final_alm.pth'
+    filename = args.save_path + '/final.pth'
     logger.info('Saving checkpoint to: ' + filename)
-    torch.save({'epoch': args.epochs, 'state_dict': model.state_dict(), 'optimizer': optimizer_pfenet.state_dict()}, filename)                
+    torch.save({
+        'epoch': args.epochs,
+        'model_state_dict': model.state_dict(),
+        'optimizer_pfenet_state_dict': optimizer_pfenet.state_dict(),
+        'alm_state_dict': active_learning_module.state_dict(),
+        'optimizer_alm_state_dict': optimizer_alm.state_dict()
+    }, filename)                
+
+    # 保存 ALM 模型
+    alm_filename = args.save_path + '/active_learning_module.pth'
+    logger.info('Saving ALM model to: ' + alm_filename)
+    torch.save(active_learning_module.state_dict(), alm_filename)
+
+    # 保存 PFENet 模型
+    pfenet_filename = args.save_path + '/pfenet_model.pth'
+    logger.info('Saving PFENet model to: ' + pfenet_filename)
+    torch.save(model.state_dict(), pfenet_filename)
 
 
 def train(train_loader, model, active_learning_module, optimizer_pfenet, optimizer_alm, epoch):
@@ -297,43 +328,84 @@ def train(train_loader, model, active_learning_module, optimizer_pfenet, optimiz
             s_input = s_input[:,0:5]
             s_mask = s_mask[:,0:5]
         else:
-            optimizer_alm.zero_grad()
+            # optimizer_alm.zero_grad()
+            # s_input_1_shot = s_input[:,0:1]
+            # s_mask_1_shot = s_mask[:,0:1]
+            # s_input_20_shot = s_input[:,1:21]
+            # s_mask_20_shot = s_mask[:,1:21]
+            # all_scores = []  # 初始化为一个空列表
+            # for i in range(20):
+            #     F_supp_mid, F_query_mid, Prior_mask_supp, Prior_mask_query, F_supp_high, F_query_high = \
+            #         extract_features(model, input, s_input_1_shot, s_mask_1_shot, s_input_20_shot[:,i:i+1])
+            #     # 计算 ALM 的得分
+            #     score = active_learning_module(F_supp_mid, F_query_mid, Prior_mask_supp, Prior_mask_query, F_supp_high, F_query_high)
+            #     all_scores.append((score, i))  # 每个元素是一个元组，包含得分和索引
+            # # len(all_scores) = 20
+            # all_scores_tensor = torch.cat([score for score, _ in all_scores], dim=1)
+            # topk_scores, topk_indices = torch.topk(all_scores_tensor, k=4, dim=1, largest=True, sorted=False)
+
+            # # 根据 topk_indices 从 s_input_20_shot 和 s_mask_20_shot 中选择对应的样本和标签
+            # topk_samples = s_input_20_shot[torch.arange(s_input_20_shot.shape[0]).unsqueeze(1), topk_indices]
+            # topk_labels = s_mask_20_shot[torch.arange(s_mask_20_shot.shape[0]).unsqueeze(1), topk_indices]
+
+            # # 将 1-shot 样本和标签与选出的 topk 样本和标签合并
+            # s_input = torch.cat([s_input_1_shot, topk_samples], dim=1)  # [batch_size, 5, C]，合并 1-shot 样本和 topk 样本
+            # s_mask = torch.cat([s_mask_1_shot, topk_labels], dim=1)  # [batch_size, 5, H, W]，合并 1-shot 标签和 topk 标签
+            
+            ##################
+            ##  2025.01.15  ##
+            ##################
             s_input_1_shot = s_input[:,0:1]
             s_mask_1_shot = s_mask[:,0:1]
             s_input_20_shot = s_input[:,1:21]
             s_mask_20_shot = s_mask[:,1:21]
-            all_scores = []  # 初始化为一个空列表
+            # 初始化存储二范数平方的列表
+            norm_squared_list = []
             for i in range(20):
                 F_supp_mid, F_query_mid, Prior_mask_supp, Prior_mask_query, F_supp_high, F_query_high = \
                     extract_features(model, input, s_input_1_shot, s_mask_1_shot, s_input_20_shot[:,i:i+1])
-                # 计算 ALM 的得分
+                # 计算 ALM 的得分, score.shape = [batch_size, height, width]
                 score = active_learning_module(F_supp_mid, F_query_mid, Prior_mask_supp, Prior_mask_query, F_supp_high, F_query_high)
-                all_scores.append((score, i))  # 每个元素是一个元组，包含得分和索引
-            # len(all_scores) = 20
-            all_scores_tensor = torch.cat([score for score, _ in all_scores], dim=1)
-            topk_scores, topk_indices = torch.topk(all_scores_tensor, k=4, dim=1, largest=True, sorted=False)
+                # out.shape = [batch_size, num_classes, height, width]
+                out, _, _, _ = model(s_x=s_input_20_shot[:,i:i+1], s_y=s_mask_20_shot[:,i:i+1], x=input, y=target)    # out.shape = [batch_size, num_classes, height, width]
+                # out_softmax.shape = [batch_size, height, width]
+                out_softmax = F.softmax(out, dim=1) # softmax在类别维度（dim=1）上进行[batch_size, height, width]
+                norm_squared = torch.sum((score - out_softmax) ** 2)
+                norm_squared_list.append(norm_squared)
+            norm_squared_tensor = torch.cat(norm_squared_list, dim=0)
 
-            # 根据 topk_indices 从 s_input_20_shot 和 s_mask_20_shot 中选择对应的样本和标签
-            topk_samples = s_input_20_shot[torch.arange(s_input_20_shot.shape[0]).unsqueeze(1), topk_indices]
-            topk_labels = s_mask_20_shot[torch.arange(s_mask_20_shot.shape[0]).unsqueeze(1), topk_indices]
+            # 找到最小的4个二范数平方
+            _, topk_indices = torch.topk(norm_squared_tensor, 4, largest=False)  # 获取最小的4个
 
+            # 根据topk_indices获取对应的样本和标签
+            topk_samples = s_input_20_shot[:, topk_indices]  # 选出最小二范数的样本
+            topk_labels = s_mask_20_shot[:, topk_indices]   # 选出对应标签
             # 将 1-shot 样本和标签与选出的 topk 样本和标签合并
             s_input = torch.cat([s_input_1_shot, topk_samples], dim=1)  # [batch_size, 5, C]，合并 1-shot 样本和 topk 样本
             s_mask = torch.cat([s_mask_1_shot, topk_labels], dim=1)  # [batch_size, 5, H, W]，合并 1-shot 标签和 topk 标签
-
             
-        output, main_loss, aux_loss = model(s_x=s_input, s_y=s_mask, x=input, y=target)
+            
+        output, main_loss, aux_loss = model(s_x=s_input, s_y=s_mask, x=input, y=target)    # out.shape = [batch_size, num_classes, height, width]
 
         if not args.multiprocessing_distributed:
             main_loss, aux_loss = torch.mean(main_loss), torch.mean(aux_loss)
         loss = main_loss + args.aux_weight * aux_loss
 
         if epoch >= args.alm_start_epoch:
-            optimizer_pfenet.zero_grad()
-            optimizer_alm.zero_grad()
-            loss.backward() 
-            optimizer_pfenet.step()
-            optimizer_alm.step()
+            if epoch % 2 == 0:
+                optimizer_pfenet.zero_grad()
+                loss.backward() 
+                optimizer_pfenet.step()
+
+                optimizer_alm.zero_grad()
+                alm_loss = norm_squared_tensor.mean()  # 取均值，或者根据需要加权
+                alm_loss.backward()
+                optimizer_alm.step()
+            else:
+                optimizer_pfenet.zero_grad()
+                loss.backward()
+                optimizer_pfenet.step()
+
         else:
             optimizer_pfenet.zero_grad()
             loss.backward()
@@ -400,8 +472,7 @@ def train(train_loader, model, active_learning_module, optimizer_pfenet, optimiz
             logger.info('Class_{} Result: iou/accuracy {:.4f}/{:.4f}.'.format(i, iou_class[i], accuracy_class[i]))        
     return main_loss_meter.avg, mIoU, mAcc, allAcc
 
-
-def validate(val_loader, model, criterion):
+def validate(val_loader, model, active_learning_module, criterion):
     if main_process():
         logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
     batch_time = AverageMeter()
@@ -415,8 +486,8 @@ def validate(val_loader, model, criterion):
         split_gap = 20
     else:
         split_gap = 5
-    class_intersection_meter = [0]*split_gap
-    class_union_meter = [0]*split_gap  
+    class_intersection_meter = [0] * split_gap
+    class_union_meter = [0] * split_gap
 
     if args.manual_seed is not None and args.fix_random_seed_val:
         torch.cuda.manual_seed(args.manual_seed)
@@ -426,88 +497,130 @@ def validate(val_loader, model, criterion):
         random.seed(args.manual_seed)
 
     model.eval()
+    if active_learning_module is not None:
+        active_learning_module.eval()  # 设置 ALM 模块为评估模式
+
     end = time.time()
     if args.split != 999:
-        if args.use_coco:
-            test_num = 20000
-        else:
-            test_num = 5000 
+        test_num = 20000 if args.use_coco else 5000
     else:
         test_num = len(val_loader)
-    assert test_num % args.batch_size_val == 0    
+    assert test_num % args.batch_size_val == 0
+
     iter_num = 0
     total_time = 0
-    for e in range(10):
+
+    for e in range(10): 
         for i, (input, target, s_input, s_mask, subcls, ori_label) in enumerate(val_loader):
-            if (iter_num-1) * args.batch_size_val >= test_num:
+            if (iter_num - 1) * args.batch_size_val >= test_num:
                 break
-            iter_num += 1    
+            iter_num += 1
+
+            # 数据加载时间
             data_time.update(time.time() - end)
             input = input.cuda(non_blocking=True)
             target = target.cuda(non_blocking=True)
             ori_label = ori_label.cuda(non_blocking=True)
+            s_input = s_input.cuda(non_blocking=True)
+            s_mask = s_mask.cuda(non_blocking=True)
+
+            # 使用 ALM 模块选择支持样本
+            if active_learning_module is not None:
+                s_input_1_shot = s_input[:, 0:1]
+                s_mask_1_shot = s_mask[:, 0:1]
+                s_input_20_shot = s_input[:, 1:21]
+                s_mask_20_shot = s_mask[:, 1:21]
+
+                norm_squared_list = []
+                for i in range(20):
+                    F_supp_mid, F_query_mid, Prior_mask_supp, Prior_mask_query, F_supp_high, F_query_high = \
+                        extract_features(model, input, s_input_1_shot, s_mask_1_shot, s_input_20_shot[:,i:i+1])
+                    # 计算 ALM 的得分, score.shape = [batch_size, height, width]
+                    score = active_learning_module(F_supp_mid, F_query_mid, Prior_mask_supp, Prior_mask_query, F_supp_high, F_query_high)
+                    # out.shape = [batch_size, num_classes, height, width]
+                    out, _, _, _ = model(s_x=s_input_20_shot[:,i:i+1], s_y=s_mask_20_shot[:,i:i+1], x=input, y=target)    # out.shape = [batch_size, num_classes, height, width]
+                    # out_softmax.shape = [batch_size, height, width]
+                    out_softmax = F.softmax(out, dim=1) # softmax在类别维度（dim=1）上进行[batch_size, height, width]
+                    norm_squared = torch.sum((score - out_softmax) ** 2)
+                    norm_squared_list.append(norm_squared)
+                norm_squared_tensor = torch.cat(norm_squared_list, dim=0)
+
+                # 找到最小的4个二范数平方
+                _, topk_indices = torch.topk(norm_squared_tensor, 4, largest=False)  # 获取最小的4个
+
+                # 根据topk_indices获取对应的样本和标签
+                topk_samples = s_input_20_shot[:, topk_indices]  # 选出最小二范数的样本
+                topk_labels = s_mask_20_shot[:, topk_indices]   # 选出对应标签
+                # 将 1-shot 样本和标签与选出的 topk 样本和标签合并
+                s_input = torch.cat([s_input_1_shot, topk_samples], dim=1)  # [batch_size, 5, C]，合并 1-shot 样本和 topk 样本
+                s_mask = torch.cat([s_mask_1_shot, topk_labels], dim=1)  # [batch_size, 5, H, W]，合并 1-shot 标签和 topk 标签
+                
             start_time = time.time()
             output = model(s_x=s_input, s_y=s_mask, x=input, y=target)
-            total_time = total_time + 1
+            total_time += 1
             model_time.update(time.time() - start_time)
 
             if args.ori_resize:
                 longerside = max(ori_label.size(1), ori_label.size(2))
-                backmask = torch.ones(ori_label.size(0), longerside, longerside).cuda()*255
+                backmask = torch.ones(ori_label.size(0), longerside, longerside).cuda() * 255
                 backmask[0, :ori_label.size(1), :ori_label.size(2)] = ori_label
                 target = backmask.clone().long()
 
-            output = F.interpolate(output, size=target.size()[1:], mode='bilinear', align_corners=True)         
-            loss = criterion(output, target)    
+            output = F.interpolate(output, size=target.size()[1:], mode='bilinear', align_corners=True)
 
-            n = input.size(0)
+            # 计算损失
+            loss = criterion(output, target)
             loss = torch.mean(loss)
 
+            # 计算交并比 (IoU)
             output = output.max(1)[1]
-
             intersection, union, new_target = intersectionAndUnionGPU(output, target, args.classes, args.ignore_label)
             intersection, union, target, new_target = intersection.cpu().numpy(), union.cpu().numpy(), target.cpu().numpy(), new_target.cpu().numpy()
             intersection_meter.update(intersection), union_meter.update(union), target_meter.update(new_target)
-                
-            subcls = subcls[0].cpu().numpy()[0]
-            class_intersection_meter[(subcls-1)%split_gap] += intersection[1]
-            class_union_meter[(subcls-1)%split_gap] += union[1] 
 
+            # 更新类别交并比
+            subcls = subcls[0].cpu().numpy()[0]
+            class_intersection_meter[(subcls - 1) % split_gap] += intersection[1]
+            class_union_meter[(subcls - 1) % split_gap] += union[1]
+
+            # 计算精度
             accuracy = sum(intersection_meter.val) / (sum(target_meter.val) + 1e-10)
             loss_meter.update(loss.item(), input.size(0))
             batch_time.update(time.time() - end)
             end = time.time()
-            if ((i + 1) % (test_num/100) == 0) and main_process():
+
+            # 打印测试进度
+            if ((i + 1) % (test_num / 100) == 0) and main_process():
                 logger.info('Test: [{}/{}] '
                             'Data {data_time.val:.3f} ({data_time.avg:.3f}) '
                             'Batch {batch_time.val:.3f} ({batch_time.avg:.3f}) '
                             'Loss {loss_meter.val:.4f} ({loss_meter.avg:.4f}) '
-                            'Accuracy {accuracy:.4f}.'.format(iter_num* args.batch_size_val, test_num,
+                            'Accuracy {accuracy:.4f}.'.format(iter_num * args.batch_size_val, test_num,
                                                               data_time=data_time,
                                                               batch_time=batch_time,
                                                               loss_meter=loss_meter,
                                                               accuracy=accuracy))
 
+    # 计算测试结果
     iou_class = intersection_meter.sum / (union_meter.sum + 1e-10)
     accuracy_class = intersection_meter.sum / (target_meter.sum + 1e-10)
     mIoU = np.mean(iou_class)
     mAcc = np.mean(accuracy_class)
     allAcc = sum(intersection_meter.sum) / (sum(target_meter.sum) + 1e-10)
 
-    
+    # 计算类别 IoU
     class_iou_class = []
     class_miou = 0
     for i in range(len(class_intersection_meter)):
-        class_iou = class_intersection_meter[i]/(class_union_meter[i]+ 1e-10)
+        class_iou = class_intersection_meter[i] / (class_union_meter[i] + 1e-10)
         class_iou_class.append(class_iou)
         class_miou += class_iou
-    class_miou = class_miou*1.0 / len(class_intersection_meter)
-    logger.info('meanIoU---Val result: mIoU {:.4f}.'.format(class_miou))
-    for i in range(split_gap):
-        logger.info('Class_{} Result: iou {:.4f}.'.format(i+1, class_iou_class[i]))            
-    
+    class_miou = class_miou * 1.0 / len(class_intersection_meter)
 
     if main_process():
+        logger.info('meanIoU---Val result: mIoU {:.4f}.'.format(class_miou))
+        for i in range(split_gap):
+            logger.info('Class_{} Result: iou {:.4f}.'.format(i + 1, class_iou_class[i]))
         logger.info('FBIoU---Val result: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}.'.format(mIoU, mAcc, allAcc))
         for i in range(args.classes):
             logger.info('Class_{} Result: iou/accuracy {:.4f}/{:.4f}.'.format(i, iou_class[i], accuracy_class[i]))

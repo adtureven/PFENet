@@ -8,7 +8,7 @@ import cv2
 
 import model.resnet as models
 import model.vgg as vgg_models
-
+import pdb
 
 def Weighted_GAP(supp_feat, mask):
     supp_feat = supp_feat * mask
@@ -284,7 +284,6 @@ class PFENet(nn.Module):
         query_feat = self.res1(query_feat)
         query_feat = self.res2(query_feat) + query_feat           
         out = self.cls(query_feat)
-        
 
         #   Output Part
         if self.zoom_factor != 1:
@@ -299,7 +298,7 @@ class PFENet(nn.Module):
                 inner_out = F.interpolate(inner_out, size=(h, w), mode='bilinear', align_corners=True)
                 aux_loss = aux_loss + self.criterion(inner_out, y.long())   
             aux_loss = aux_loss / len(out_list)
-            return out.max(1)[1], main_loss, aux_loss
+            return out,out.max(1)[1], main_loss, aux_loss
         else:
             return out
 

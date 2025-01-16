@@ -110,29 +110,58 @@ def extract_features(pfenet, x, s_x, s_y, us_x):
 class ActiveLearningModule(nn.Module):
     def __init__(self, mid_channels, high_channels):
         super(ActiveLearningModule, self).__init__()
+        
         # 中层特征卷积
         self.conv_mid = nn.Sequential(
             nn.Conv2d(2 * mid_channels, 256, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(256, 128, kernel_size=3, padding=1),  # 输出通道数为 128
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),  # 进一步压缩通道
             nn.ReLU()
         )
+        
         # 先验掩码扩展和卷积
         self.expand_prior = nn.Conv2d(2, 64, kernel_size=1)  # 将通道数从 2 扩展到 64
         self.conv_prior = nn.Sequential(
             nn.Conv2d(64, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 16, kernel_size=3, padding=1),  # 进一步压缩通道
             nn.ReLU()
         )
+        
         # 高层特征卷积
         self.conv_high = nn.Sequential(
             nn.Conv2d(2 * high_channels, 512, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(512, 128, kernel_size=3, padding=1),  # 输出通道数为 128
+            nn.Conv2d(512, 256, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),  # 进一步压缩通道
             nn.ReLU()
         )
-        # 全局池化和全连接层
-        self.global_pool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Linear(128 + 32 + 128, 1)  # 输入通道数为 128 + 32 + 128
+        
+        # 多尺度特征融合
+        self.multi_scale_fusion = nn.Sequential(
+            nn.Conv2d(64 + 16 + 128, 256, kernel_size=3, padding=1),  # 输入通道数为 64 + 16 + 128
+            nn.ReLU(),
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
+            nn.ReLU()
+        )
+        
+        # 注意力机制
+        self.attention = nn.Sequential(
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 1, kernel_size=3, padding=1),  # 输出通道数为 1
+            nn.Sigmoid()  # 注意力权重归一化到 [0, 1]
+        )
+        
+        # 最终卷积层，输出通道数为 1
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 1, kernel_size=3, padding=1)  # 输出通道数为 1
+        )
         self.sigmoid = nn.Sigmoid()  # 用于得分归一化
 
     def forward(self, F_supp_mid, F_query_mid, Prior_mask_supp, Prior_mask_query, F_supp_high, F_query_high):
@@ -140,17 +169,26 @@ class ActiveLearningModule(nn.Module):
         F_mid_concat = torch.cat([F_supp_mid, F_query_mid], dim=1)  # [2 * C1, H, W]
         F_prior_concat = torch.cat([Prior_mask_supp, Prior_mask_query], dim=1)  # [2, H, W]
         F_high_concat = torch.cat([F_supp_high, F_query_high], dim=1)  # [2 * C2, H, W]
+        
         # 分别卷积
-        F_mid = self.conv_mid(F_mid_concat)  # [128, H, W]
+        F_mid = self.conv_mid(F_mid_concat)  # [64, H, W]
         F_prior_expanded = self.expand_prior(F_prior_concat)  # [64, H, W]
-        F_prior = self.conv_prior(F_prior_expanded)  # [32, H, W]
+        F_prior = self.conv_prior(F_prior_expanded)  # [16, H, W]
         F_high = self.conv_high(F_high_concat)  # [128, H, W]
-        # 最终拼接
-        F_final_concat = torch.cat([F_mid, F_prior, F_high], dim=1)  # [128 + 32 + 128, H, W]
-        # 计算得分
-        F_pool = self.global_pool(F_final_concat).squeeze(-1).squeeze(-1)  # [batch_size, 128 + 32 + 128]
-        score = self.fc(F_pool)  # [batch_size, 1]
+        
+        # 多尺度特征融合
+        F_final_concat = torch.cat([F_mid, F_prior, F_high], dim=1)  # [64 + 16 + 128, H, W]
+        F_fused = self.multi_scale_fusion(F_final_concat)  # [128, H, W]
+        
+        # 注意力机制
+        attention_weights = self.attention(F_fused)  # [1, H, W]
+        F_attended = F_fused * attention_weights  # 应用注意力权重
+        
+        # 最终卷积层
+        score = self.final_conv(F_attended)  # [batch_size, 1, H, W]
         score = self.sigmoid(score)  # 归一化得分到 [0, 1]
+        score = score.squeeze(1)  # [batch_size, H, W]
+        
         return score
 
     # 计算损失差异

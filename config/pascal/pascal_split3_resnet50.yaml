@@ -32,12 +32,12 @@ TRAIN:
   manual_seed: 321
   print_freq: 5
   save_freq: 20
-  save_path: exp/pascal/split0_resnet50/model
+  save_path: exp/pascal/split0_resnet50_alm/model
   weight:  # load weight for fine-tuning or testing
   resume:  # path to latest checkpoint (default: none)
   evaluate: True
-  split: 0
-  shot: 5
+  split: 3
+  shot: 1
   vgg: False
   ppm_scales: [60, 30, 15, 8]
   fix_random_seed_val: True

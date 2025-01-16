@@ -1,3 +1,4 @@
 initmodel/
 VOCdevkit/
 coco_data/
+exp/pascal
