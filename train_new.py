@@ -155,7 +155,8 @@ def main_worker(gpu, ngpus_per_node, argss):
     logger.info(model)
     print(args)
 
-    model = torch.nn.DataParallel(model.cuda())
+    # model = torch.nn.DataParallel(model.cuda())
+    model = model.cuda()
 
     if args.weight:
         if os.path.isfile(args.weight):
@@ -227,7 +228,7 @@ def main_worker(gpu, ngpus_per_node, argss):
                 transform.test_Resize(size=args.val_size),
                 transform.ToTensor(),
                 transform.Normalize(mean=mean, std=std)])           
-        val_data = dataset.SemData(split=args.split, shot=args.shot, data_root=args.data_root, \
+        val_data = dataset.SemData(split=args.split, shot=21, data_root=args.data_root, \
                                 data_list=args.val_list, transform=val_transform, mode='val', \
                                 use_coco=args.use_coco, use_split_coco=args.use_split_coco)
         val_sampler = None
@@ -245,6 +246,9 @@ def main_worker(gpu, ngpus_per_node, argss):
             random.seed(args.manual_seed + epoch)
 
         epoch_log = epoch + 1
+        # # for debug
+        # loss_val, mIoU_val, mAcc_val, allAcc_val, class_miou = validate(val_loader, model, active_learning_module, criterion)
+
         loss_train, mIoU_train, mAcc_train, allAcc_train = train(train_loader, model,active_learning_module, optimizer_pfenet, optimizer_alm,epoch)
         if main_process():
             writer.add_scalar('loss_train', loss_train, epoch_log)
@@ -328,64 +332,60 @@ def train(train_loader, model, active_learning_module, optimizer_pfenet, optimiz
             s_input = s_input[:,0:5]
             s_mask = s_mask[:,0:5]
         else:
-            # optimizer_alm.zero_grad()
-            # s_input_1_shot = s_input[:,0:1]
-            # s_mask_1_shot = s_mask[:,0:1]
-            # s_input_20_shot = s_input[:,1:21]
-            # s_mask_20_shot = s_mask[:,1:21]
-            # all_scores = []  # 初始化为一个空列表
-            # for i in range(20):
-            #     F_supp_mid, F_query_mid, Prior_mask_supp, Prior_mask_query, F_supp_high, F_query_high = \
-            #         extract_features(model, input, s_input_1_shot, s_mask_1_shot, s_input_20_shot[:,i:i+1])
-            #     # 计算 ALM 的得分
-            #     score = active_learning_module(F_supp_mid, F_query_mid, Prior_mask_supp, Prior_mask_query, F_supp_high, F_query_high)
-            #     all_scores.append((score, i))  # 每个元素是一个元组，包含得分和索引
-            # # len(all_scores) = 20
-            # all_scores_tensor = torch.cat([score for score, _ in all_scores], dim=1)
-            # topk_scores, topk_indices = torch.topk(all_scores_tensor, k=4, dim=1, largest=True, sorted=False)
-
-            # # 根据 topk_indices 从 s_input_20_shot 和 s_mask_20_shot 中选择对应的样本和标签
-            # topk_samples = s_input_20_shot[torch.arange(s_input_20_shot.shape[0]).unsqueeze(1), topk_indices]
-            # topk_labels = s_mask_20_shot[torch.arange(s_mask_20_shot.shape[0]).unsqueeze(1), topk_indices]
-
-            # # 将 1-shot 样本和标签与选出的 topk 样本和标签合并
-            # s_input = torch.cat([s_input_1_shot, topk_samples], dim=1)  # [batch_size, 5, C]，合并 1-shot 样本和 topk 样本
-            # s_mask = torch.cat([s_mask_1_shot, topk_labels], dim=1)  # [batch_size, 5, H, W]，合并 1-shot 标签和 topk 标签
-            
-            ##################
-            ##  2025.01.15  ##
-            ##################
             s_input_1_shot = s_input[:,0:1]
             s_mask_1_shot = s_mask[:,0:1]
             s_input_20_shot = s_input[:,1:21]
             s_mask_20_shot = s_mask[:,1:21]
             # 初始化存储二范数平方的列表
             norm_squared_list = []
+            kl_div_list = []    
             for i in range(20):
+                torch.autograd.set_detect_anomaly(True)
                 F_supp_mid, F_query_mid, Prior_mask_supp, Prior_mask_query, F_supp_high, F_query_high = \
                     extract_features(model, input, s_input_1_shot, s_mask_1_shot, s_input_20_shot[:,i:i+1])
                 # 计算 ALM 的得分, score.shape = [batch_size, height, width]
                 score = active_learning_module(F_supp_mid, F_query_mid, Prior_mask_supp, Prior_mask_query, F_supp_high, F_query_high)
+                # 添加通道维度，变为 [4, 1, 60, 60]
+                score = score.unsqueeze(1)  # 现在 score.shape = [4, 1, 60, 60]
+
+                # 使用 F.interpolate 进行上采样，变为 [4, 1, 473, 473]
+                score = F.interpolate(score, size=(473, 473), mode='bilinear', align_corners=True)
+
+                # 如果需要去掉通道维度，可以使用 squeeze
+                score = score.squeeze(1)  # 现在 score.shape = [4, 473, 473]
+
                 # out.shape = [batch_size, num_classes, height, width]
                 out, _, _, _ = model(s_x=s_input_20_shot[:,i:i+1], s_y=s_mask_20_shot[:,i:i+1], x=input, y=target)    # out.shape = [batch_size, num_classes, height, width]
                 # out_softmax.shape = [batch_size, height, width]
-                out_softmax = F.softmax(out, dim=1) # softmax在类别维度（dim=1）上进行[batch_size, height, width]
-                norm_squared = torch.sum((score - out_softmax) ** 2)
+                out_softmax = F.softmax(out, dim=1) # softmax在类别维度（dim=1）上进行[batch_size, 2,height, width]
+
+                # 将 score 转换为概率分布
+                score_prob = torch.stack([torch.sub(1, score).clone(), score.clone()], dim=1)  # [batch_size, 2, h, w]
+                # # 计算 KL 散度
+                # kl_div = F.kl_div(out_softmax.log(), score_prob, reduction='batchmean')
+                # print("KL Divergence:", kl_div.item())
+                norm_squared = torch.sum((score_prob - out_softmax) ** 2)
+                # pdb.set_trace()
                 norm_squared_list.append(norm_squared)
+                # kl_div_list.append(kl_div)
+            # 将标量转换为一维张量
+            norm_squared_list = [t.unsqueeze(0).clone() for t in norm_squared_list]
             norm_squared_tensor = torch.cat(norm_squared_list, dim=0)
+            # kl_div_tensor = torch.cat(kl_div_list, dim=0)
+            # topk_indices = sorted(range(len(kl_div_list)), key=lambda i: kl_div_list[i])[:4]
 
             # 找到最小的4个二范数平方
             _, topk_indices = torch.topk(norm_squared_tensor, 4, largest=False)  # 获取最小的4个
-
+            # _, topk_indices = torch.topk(kl_div_tensor, 4, largest=False)  # 获取最小的4个
             # 根据topk_indices获取对应的样本和标签
             topk_samples = s_input_20_shot[:, topk_indices]  # 选出最小二范数的样本
             topk_labels = s_mask_20_shot[:, topk_indices]   # 选出对应标签
             # 将 1-shot 样本和标签与选出的 topk 样本和标签合并
-            s_input = torch.cat([s_input_1_shot, topk_samples], dim=1)  # [batch_size, 5, C]，合并 1-shot 样本和 topk 样本
-            s_mask = torch.cat([s_mask_1_shot, topk_labels], dim=1)  # [batch_size, 5, H, W]，合并 1-shot 标签和 topk 标签
+            s_input = torch.cat([s_input_1_shot.clone(), topk_samples.clone()], dim=1)  # [batch_size, 5, C]，合并 1-shot 样本和 topk 样本
+            s_mask = torch.cat([s_mask_1_shot.clone(), topk_labels.clone()], dim=1)  # [batch_size, 5, H, W]，合并 1-shot 标签和 topk 标签
             
             
-        output, main_loss, aux_loss = model(s_x=s_input, s_y=s_mask, x=input, y=target)    # out.shape = [batch_size, num_classes, height, width]
+        out, output, main_loss, aux_loss = model(s_x=s_input, s_y=s_mask, x=input, y=target)    # out.shape = [batch_size, num_classes, height, width]
 
         if not args.multiprocessing_distributed:
             main_loss, aux_loss = torch.mean(main_loss), torch.mean(aux_loss)
@@ -393,12 +393,14 @@ def train(train_loader, model, active_learning_module, optimizer_pfenet, optimiz
 
         if epoch >= args.alm_start_epoch:
             if epoch % 2 == 0:
-                optimizer_pfenet.zero_grad()
-                loss.backward() 
-                optimizer_pfenet.step()
+                # optimizer_pfenet.zero_grad()
+                # loss.backward() 
+                # optimizer_pfenet.step()
 
                 optimizer_alm.zero_grad()
                 alm_loss = norm_squared_tensor.mean()  # 取均值，或者根据需要加权
+                # alm_loss = kl_div_tensor.mean() 
+                # alm_loss = torch.stack(kl_div_list).mean()  # 计算KL散度的均值作为总损失
                 alm_loss.backward()
                 optimizer_alm.step()
             else:
@@ -475,6 +477,7 @@ def train(train_loader, model, active_learning_module, optimizer_pfenet, optimiz
 def validate(val_loader, model, active_learning_module, criterion):
     if main_process():
         logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
+    # pdb.set_trace()
     batch_time = AverageMeter()
     model_time = AverageMeter()
     data_time = AverageMeter()
@@ -512,6 +515,7 @@ def validate(val_loader, model, active_learning_module, criterion):
 
     for e in range(10): 
         for i, (input, target, s_input, s_mask, subcls, ori_label) in enumerate(val_loader):
+            print(i, len(val_loader))
             if (iter_num - 1) * args.batch_size_val >= test_num:
                 break
             iter_num += 1
@@ -537,12 +541,23 @@ def validate(val_loader, model, active_learning_module, criterion):
                         extract_features(model, input, s_input_1_shot, s_mask_1_shot, s_input_20_shot[:,i:i+1])
                     # 计算 ALM 的得分, score.shape = [batch_size, height, width]
                     score = active_learning_module(F_supp_mid, F_query_mid, Prior_mask_supp, Prior_mask_query, F_supp_high, F_query_high)
-                    # out.shape = [batch_size, num_classes, height, width]
-                    out, _, _, _ = model(s_x=s_input_20_shot[:,i:i+1], s_y=s_mask_20_shot[:,i:i+1], x=input, y=target)    # out.shape = [batch_size, num_classes, height, width]
+                    # out.shape = [batch_size, num_classes, height, width]                    
+                    # 添加通道维度，变为 [4, 1, 60, 60]
+                    score = score.unsqueeze(1)  # 现在 score.shape = [4, 1, 60, 60]
+
+                    # 使用 F.interpolate 进行上采样，变为 [4, 1, 473, 473]
+                    score = F.interpolate(score, size=(473, 473), mode='bilinear', align_corners=True)
+
+                    # 如果需要去掉通道维度，可以使用 squeeze
+                    score = score.squeeze(1)  # 现在 score.shape = [4, 473, 473]
+                    out = model(s_x=s_input_20_shot[:,i:i+1], s_y=s_mask_20_shot[:,i:i+1], x=input, y=target)    # out.shape = [batch_size, num_classes, height, width]
                     # out_softmax.shape = [batch_size, height, width]
                     out_softmax = F.softmax(out, dim=1) # softmax在类别维度（dim=1）上进行[batch_size, height, width]
-                    norm_squared = torch.sum((score - out_softmax) ** 2)
+                    score_prob = torch.stack([1 - score, score], dim=1)  # [batch_size, 2, h, w]
+                    norm_squared = torch.sum((score_prob - out_softmax) ** 2)
                     norm_squared_list.append(norm_squared)
+                # 将标量转换为一维张量
+                norm_squared_list = [t.unsqueeze(0) for t in norm_squared_list]
                 norm_squared_tensor = torch.cat(norm_squared_list, dim=0)
 
                 # 找到最小的4个二范数平方

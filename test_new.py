@@ -229,7 +229,7 @@ def validate(val_loader, model, active_learning_module, criterion):
                     # 计算 ALM 的得分, score.shape = [batch_size, height, width]
                     score = active_learning_module(F_supp_mid, F_query_mid, Prior_mask_supp, Prior_mask_query, F_supp_high, F_query_high)
                     # out.shape = [batch_size, num_classes, height, width]
-                    out, _, _, _ = model(s_x=s_input_20_shot[:,i:i+1], s_y=s_mask_20_shot[:,i:i+1], x=input, y=target)    # out.shape = [batch_size, num_classes, height, width]
+                    out = model(s_x=s_input_20_shot[:,i:i+1], s_y=s_mask_20_shot[:,i:i+1], x=input, y=target)    # out.shape = [batch_size, num_classes, height, width]
                     # out_softmax.shape = [batch_size, height, width]
                     out_softmax = F.softmax(out, dim=1) # softmax在类别维度（dim=1）上进行[batch_size, height, width]
                     norm_squared = torch.sum((score - out_softmax) ** 2)

@@ -284,7 +284,6 @@ class PFENet(nn.Module):
         query_feat = self.res1(query_feat)
         query_feat = self.res2(query_feat) + query_feat           
         out = self.cls(query_feat)
-
         #   Output Part
         if self.zoom_factor != 1:
             out = F.interpolate(out, size=(h, w), mode='bilinear', align_corners=True)

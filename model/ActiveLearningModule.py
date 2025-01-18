@@ -69,11 +69,11 @@ def extract_features(pfenet, x, s_x, s_y, us_x):
     # pdb.set_trace()
     with torch.no_grad():
         # 查询图像的前向传播
-        query_feat_0 = pfenet.module.layer0(x)
-        query_feat_1 = pfenet.module.layer1(query_feat_0)
-        query_feat_2 = pfenet.module.layer2(query_feat_1)
-        query_feat_3 = pfenet.module.layer3(query_feat_2)
-        query_feat_4 = pfenet.module.layer4(query_feat_3)
+        query_feat_0 = pfenet.layer0(x)
+        query_feat_1 = pfenet.layer1(query_feat_0)
+        query_feat_2 = pfenet.layer2(query_feat_1)
+        query_feat_3 = pfenet.layer3(query_feat_2)
+        query_feat_4 = pfenet.layer4(query_feat_3)
 
     F_query_mid = torch.cat([query_feat_3, query_feat_2], 1)
     F_query_high = query_feat_4
@@ -82,21 +82,21 @@ def extract_features(pfenet, x, s_x, s_y, us_x):
     mask = (s_y[:, 0, :, :] == 1).float().unsqueeze(1)
     with torch.no_grad():
         # 支持图像的前向传播
-        supp_feat_0 = pfenet.module.layer0(s_x[:, 0, :, :, :])  # 提取低层特征
-        supp_feat_1 = pfenet.module.layer1(supp_feat_0)
-        supp_feat_2 = pfenet.module.layer2(supp_feat_1)
-        supp_feat_3 = pfenet.module.layer3(supp_feat_2)  # 中层特征 (conv3_x)
+        supp_feat_0 = pfenet.layer0(s_x[:, 0, :, :, :])
+        supp_feat_1 = pfenet.layer1(supp_feat_0)
+        supp_feat_2 = pfenet.layer2(supp_feat_1)
+        supp_feat_3 = pfenet.layer3(supp_feat_2)
         mask = F.interpolate(mask, size=(supp_feat_3.size(2), supp_feat_3.size(3)), mode='bilinear', align_corners=True)
-        supp_feat_4 = pfenet.module.layer4(supp_feat_3 * mask)  # 高层特征 (conv5_x)
+        supp_feat_4 = pfenet.layer4(supp_feat_3 * mask)
 
     # 提取unlabeled support图像的特征
     with torch.no_grad():
         # 查询图像的前向传播
-        us_feat_0 = pfenet.module.layer0(us_x[:, 0, :, :, :])
-        us_feat_1 = pfenet.module.layer1(us_feat_0)
-        us_feat_2 = pfenet.module.layer2(us_feat_1)
-        us_feat_3 = pfenet.module.layer3(us_feat_2)
-        us_feat_4 = pfenet.module.layer4(us_feat_3)
+        us_feat_0 = pfenet.layer0(us_x[:, 0, :, :, :])
+        us_feat_1 = pfenet.layer1(us_feat_0)
+        us_feat_2 = pfenet.layer2(us_feat_1)
+        us_feat_3 = pfenet.layer3(us_feat_2)
+        us_feat_4 = pfenet.layer4(us_feat_3)
 
     F_supp_mid = torch.cat([us_feat_3, us_feat_2], 1)
     F_supp_high = us_feat_4
