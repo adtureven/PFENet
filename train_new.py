@@ -257,7 +257,14 @@ def main_worker(gpu, ngpus_per_node, argss):
             writer.add_scalar('allAcc_train', allAcc_train, epoch_log)     
 
         if args.evaluate and (epoch % 2 == 0 or (args.epochs<=50 and epoch%1==0)):
-            loss_val, mIoU_val, mAcc_val, allAcc_val, class_miou = validate(val_loader, model, active_learning_module, criterion)
+            # loss_val, mIoU_val, mAcc_val, allAcc_val, class_miou = validate(val_loader, model, active_learning_module, criterion)
+            if epoch >= args.alm_start_epoch and epoch % 2 == 0:
+                # 训练 ALM 时，传入 active_learning_module
+                loss_val, mIoU_val, mAcc_val, allAcc_val, class_miou = validate(val_loader, model, active_learning_module, criterion)
+            else:
+                # 训练 PFENet 时，传入 None 作为 active_learning_module
+                loss_val, mIoU_val, mAcc_val, allAcc_val, class_miou = validate(val_loader, model, None, criterion)
+                
             if main_process():
                 writer.add_scalar('loss_val', loss_val, epoch_log)
                 writer.add_scalar('mIoU_val', mIoU_val, epoch_log)
@@ -339,10 +346,10 @@ def train(train_loader, model, active_learning_module, optimizer_pfenet, optimiz
             # 初始化存储二范数平方的列表
             norm_squared_list = []
             kl_div_list = []    
-            for i in range(20):
+            for k in range(20):
                 torch.autograd.set_detect_anomaly(True)
                 F_supp_mid, F_query_mid, Prior_mask_supp, Prior_mask_query, F_supp_high, F_query_high = \
-                    extract_features(model, input, s_input_1_shot, s_mask_1_shot, s_input_20_shot[:,i:i+1])
+                    extract_features(model, input, s_input_1_shot, s_mask_1_shot, s_input_20_shot[:,k:k+1])
                 # 计算 ALM 的得分, score.shape = [batch_size, height, width]
                 score = active_learning_module(F_supp_mid, F_query_mid, Prior_mask_supp, Prior_mask_query, F_supp_high, F_query_high)
                 # 添加通道维度，变为 [4, 1, 60, 60]
@@ -355,7 +362,7 @@ def train(train_loader, model, active_learning_module, optimizer_pfenet, optimiz
                 score = score.squeeze(1)  # 现在 score.shape = [4, 473, 473]
 
                 # out.shape = [batch_size, num_classes, height, width]
-                out, _, _, _ = model(s_x=s_input_20_shot[:,i:i+1], s_y=s_mask_20_shot[:,i:i+1], x=input, y=target)    # out.shape = [batch_size, num_classes, height, width]
+                out, _, _, _ = model(s_x=s_input_20_shot[:,k:k+1], s_y=s_mask_20_shot[:,k:k+1], x=input, y=target)    # out.shape = [batch_size, num_classes, height, width]
                 # out_softmax.shape = [batch_size, height, width]
                 out_softmax = F.softmax(out, dim=1) # softmax在类别维度（dim=1）上进行[batch_size, 2,height, width]
 

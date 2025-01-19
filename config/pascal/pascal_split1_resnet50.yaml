@@ -32,7 +32,7 @@ TRAIN:
   manual_seed: 321
   print_freq: 5
   save_freq: 20
-  save_path: exp/pascal/split0_resnet50/model
+  save_path: exp/pascal/split1_resnet50/model
   weight:  # load weight for fine-tuning or testing
   resume:  # path to latest checkpoint (default: none)
   evaluate: True
